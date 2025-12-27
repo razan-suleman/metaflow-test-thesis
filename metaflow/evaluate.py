@@ -25,14 +25,24 @@ def _evaluate_model(model, loader):
 
 def load_client_model(client: str) -> LocalCNN:
     model = LocalCNN().to(DEVICE)
-    state = torch.load(os.path.join(CHECKPOINT_DIR, f"client_{client}.pt"), map_location=DEVICE)
+    path = os.path.join(CHECKPOINT_DIR, f"client_{client}.pt")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"Checkpoint not found: {path}.\nRun the training script to create it: `python train_local.py` or place the checkpoint in the `checkpoints/` directory."
+        )
+    state = torch.load(path, map_location=DEVICE)
     model.load_state_dict(state)
     return model
 
 
 def load_student_model() -> StudentModel:
     model = StudentModel().to(DEVICE)
-    state = torch.load(os.path.join(CHECKPOINT_DIR, "student.pt"), map_location=DEVICE)
+    path = os.path.join(CHECKPOINT_DIR, "student.pt")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"Checkpoint not found: {path}.\nRun the appropriate training/distillation script to create it or place the checkpoint in the `checkpoints/` directory."
+        )
+    state = torch.load(path, map_location=DEVICE)
     model.load_state_dict(state)
     return model
 

@@ -8,10 +8,9 @@ def _load_mnist(root="./data", train=True):
     return datasets.MNIST(root=root, train=train, download=True, transform=transform)
 
 
-def get_client_a_dataset(root="./data", train=True) -> Dataset:
-    """
-    Client A: sees digits 0-4.
-    """
+def get_client_a_dataset(root="./data", train=True):
     full = _load_mnist(root=root, train=train)
-    indices = [i for i, (x, y) in enumerate(full) if y in {0, 1, 2, 3, 4}]
+    indices = [i for i, (_, y) in enumerate(full) if y in {0,1,2,3,4}]
     return Subset(full, indices)
+
+

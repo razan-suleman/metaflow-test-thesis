@@ -5,8 +5,9 @@ import torch
 from torch import nn, optim
 from torch.utils.data import DataLoader
 
-from data import get_client_a_dataset, get_client_b_dataset
-from models import local_model
+from metaflow.data import get_client_a_dataset, get_client_b_dataset
+
+from metaflow.models import local_model
 
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -26,6 +27,8 @@ def train_client(client: str, epochs: int = 3, batch_size: int = 64, lr: float =
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
     dataset = get_client_dataset(client)
+    print(f"Client {client} train size: {len(dataset)}")
+
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
     model = local_model.LocalCNN().to(DEVICE)
