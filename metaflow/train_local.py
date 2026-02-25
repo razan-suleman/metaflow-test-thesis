@@ -1,5 +1,6 @@
 import os
 from typing import Literal
+from metaflow.data.noisy_wrapper import NoisyLabelDataset
 
 import torch
 from torch import nn, optim
@@ -28,6 +29,11 @@ def train_client(client: str, epochs: int = 3, batch_size: int = 64, lr: float =
 
     dataset = get_client_dataset(client)
     print(f"Client {client} train size: {len(dataset)}")
+
+    # add noise only AFTER dataset exists
+    if client == "b":
+        from metaflow.data.noisy_wrapper import NoisyLabelDataset
+        dataset = NoisyLabelDataset(dataset, num_classes=10, noise_p=0.2, seed=0)
 
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
