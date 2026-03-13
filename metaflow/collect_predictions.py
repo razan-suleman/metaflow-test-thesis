@@ -7,7 +7,8 @@ from models.local_model import LocalCNN
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 CHECKPOINT_DIR = "checkpoints"
-PREDICTIONS_DIR = "predictions"
+# revised: use artifacts folder for probe logits instead of predictions/
+ARTIFACTS_DIR = "artifacts/probe_logits"
 
 
 def load_client_model(client: str) -> LocalCNN:
@@ -20,7 +21,8 @@ def load_client_model(client: str) -> LocalCNN:
 
 
 def collect_for_client(client: str, batch_size: int = 128):
-    os.makedirs(PREDICTIONS_DIR, exist_ok=True)
+    # ensure output directory exists
+    os.makedirs(ARTIFACTS_DIR, exist_ok=True)
 
     probe_ds = get_probe_dataset()
     loader = DataLoader(probe_ds, batch_size=batch_size, shuffle=False)
@@ -35,14 +37,15 @@ def collect_for_client(client: str, batch_size: int = 128):
             all_logits.append(logits.cpu())
 
     all_logits = torch.cat(all_logits, dim=0)
+    out_path = os.path.join(ARTIFACTS_DIR, f"client_{client}_probe_logits.pt")
     torch.save(
         {
             "logits": all_logits,
             "num_samples": len(probe_ds),
         },
-        os.path.join(PREDICTIONS_DIR, f"client_{client}_probes.pt"),
+        out_path,
     )
-    print(f"Saved probe logits for client {client}.")
+    print(f"Saved probe logits for client {client} at {out_path}.")
 
 
 if __name__ == "__main__":

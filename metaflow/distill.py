@@ -3,7 +3,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from metaflow.data import get_test_dataset  # replace with probe dataset later
+from metaflow.data import get_probe_dataset
 from metaflow.models.student_model import StudentModel
 from metaflow.core import MetaFlow
 from metaflow.coordinators.confidence_select import ConfidenceSelectCoordinator
@@ -18,26 +18,37 @@ def distill(
     batch_size=128,
     lr=1e-3,
     temperature=2.0,
+    coordinator=None,  # instance implementing Coordinator protocol
 ):
+    """Distill a student model using the MetaFlow teacher.
+
+    Parameters mirror the old script. If ``coordinator`` is None a
+    :class:`ConfidenceSelectCoordinator` is constructed.  Pass a different
+    coordinator instance to vary the teacher behaviour.
+    """
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
     # -------- Teacher: MetaFlow --------
     a = load_client_model("a")
     b = load_client_model("b")
 
+    if coordinator is None:
+        coordinator = ConfidenceSelectCoordinator()
+
     teacher = MetaFlow(
         agents=[
             LocalCNNAgent(a, DEVICE),
             LocalCNNAgent(b, DEVICE),
         ],
-        coordinator=ConfidenceSelectCoordinator(),
+        coordinator=coordinator,
     )
 
     # -------- Student --------
     student = StudentModel().to(DEVICE)
     optimizer = torch.optim.Adam(student.parameters(), lr=lr)
 
-    dataset = get_test_dataset()  # swap with probe dataset later
+    # use probe dataset for distillation so student sees the same inputs used in other parts
+    dataset = get_probe_dataset()
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
     student.train()
@@ -74,4 +85,29 @@ def distill(
 
 
 if __name__ == "__main__":
-    distill()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Run distillation to create a student model.")
+    parser.add_argument("--epochs", type=int, default=5)
+    parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--temperature", type=float, default=2.0)
+    parser.add_argument(
+        "--coordinator",
+        choices=["confidence", "margin"],
+        default="confidence",
+        help="Which coordinator to use for the teacher MetaFlow.",
+    )
+    args = parser.parse_args()
+
+    if args.coordinator == "confidence":
+        coord = ConfidenceSelectCoordinator()
+    else:
+        coord = MarginSelectCoordinator()
+    distill(
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        lr=args.lr,
+        temperature=args.temperature,
+        coordinator=coord,
+    )

@@ -1,0 +1,7 @@
+# generated outputs
+artifacts/
+checkpoints/
+
+# python cache
+__pycache__/
+*.py[cod]

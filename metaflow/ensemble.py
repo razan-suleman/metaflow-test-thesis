@@ -3,8 +3,9 @@ import os
 import torch
 import torch.nn.functional as F
 
-CHECKPOINT_DIR = "./checkpoints"
-os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+# model weights live in checkpoints/, but probe logits are stored as artifacts
+ARTIFACTS_DIR = "artifacts/probe_logits"
+os.makedirs(ARTIFACTS_DIR, exist_ok=True)
 
 
 def build_ensemble(client_names=None, weights=None):
@@ -23,7 +24,12 @@ def build_ensemble(client_names=None, weights=None):
 
     client_probs = []
     for name in client_names:
-        path = os.path.join(CHECKPOINT_DIR, f"{name}_probe_logits.pt")
+        path = os.path.join(ARTIFACTS_DIR, f"{name}_probe_logits.pt")
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                f"Expected probe logits for client '{name}' at {path}.\n"
+                "Run collect_predictions.py for that client first."
+            )
         logits = torch.load(path, map_location="cpu")
         probs = F.softmax(logits, dim=1)  # (N_probes, num_classes)
         client_probs.append(probs)
@@ -36,7 +42,8 @@ def build_ensemble(client_names=None, weights=None):
     for w, p in zip(weights, client_probs):
         ensemble += w * p
 
-    out_path = os.path.join(CHECKPOINT_DIR, "ensemble_probe_probs.pt")
+    # optionally keep ensemble result with other artifacts
+    out_path = os.path.join(ARTIFACTS_DIR, "ensemble_probe_probs.pt")
     torch.save(ensemble, out_path)
     print(f"Saved ensemble probe probabilities to {out_path}")
 
