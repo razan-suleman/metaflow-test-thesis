@@ -1,14 +1,15 @@
 import os
+import random
 from typing import Literal
-from metaflow.data.noisy_wrapper import NoisyLabelDataset
+from data.noisy_wrapper import NoisyLabelDataset
 
 import torch
 from torch import nn, optim
 from torch.utils.data import DataLoader
 
-from metaflow.data import get_client_a_dataset, get_client_b_dataset
+from data import get_client_a_dataset, get_client_b_dataset
 
-from metaflow.models import local_model
+from models import local_model
 
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -24,7 +25,11 @@ def get_client_dataset(client: Literal["a", "b"]):
         raise ValueError("client must be 'a' or 'b'")
 
 
-def train_client(client: str, epochs: int = 3, batch_size: int = 64, lr: float = 1e-3):
+def train_client(client: str, epochs: int = 3, batch_size: int = 64, lr: float = 1e-3, seed: int = 42):
+    random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
     dataset = get_client_dataset(client)
@@ -32,10 +37,12 @@ def train_client(client: str, epochs: int = 3, batch_size: int = 64, lr: float =
 
     # add noise only AFTER dataset exists
     if client == "b":
-        from metaflow.data.noisy_wrapper import NoisyLabelDataset
+        from data.noisy_wrapper import NoisyLabelDataset
         dataset = NoisyLabelDataset(dataset, num_classes=10, noise_p=0.2, seed=0)
 
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    g = torch.Generator()
+    g.manual_seed(seed)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, generator=g)
 
     model = local_model.LocalCNN().to(DEVICE)
     criterion = nn.CrossEntropyLoss()

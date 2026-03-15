@@ -1,29 +1,44 @@
 import argparse
 import json
 import os
+import random
 from datetime import datetime
 
 import torch
 from torch.utils.data import DataLoader
 
-from metaflow.train_local import train_client
-from metaflow.distill import distill
-from metaflow.evaluate import (
+from train_local import train_client
+from distill import distill
+from evaluate import (
     load_client_model,
     load_student_model,
     _evaluate_model,
     DEVICE,
 )
-from metaflow.core import MetaFlow
-from metaflow.agents.local_cnn_agent import LocalCNNAgent
-from metaflow.coordinators.confidence_select import ConfidenceSelectCoordinator
-from metaflow.coordinators.margin_select import MarginSelectCoordinator
-from metaflow.data import get_test_dataset
+from core import MetaFlow
+from agents.local_cnn_agent import LocalCNNAgent
+from coordinators.confidence_select import ConfidenceSelectCoordinator
+from coordinators.margin_select import MarginSelectCoordinator
+from coordinators.average_logits import AverageLogitsCoordinator
+from data import get_test_dataset
 
 # directories used by the pipeline
 ARTIFACTS_DIR = "artifacts"
 RESULTS_DIR = os.path.join(ARTIFACTS_DIR, "results")
 CHECKPOINT_DIR = "checkpoints"
+
+# default experiment settings (used when no CLI flags are provided)
+DEFAULT_EXP_NAME = f"exp_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+DEFAULT_COORDINATOR = "confidence"
+DEFAULT_SKIP_TRAIN = False
+DEFAULT_DISTILL_EPOCHS = 5
+DEFAULT_SEED = 42
+
+
+def set_seed(seed: int):
+    random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
 
 def ensure_dirs():
@@ -49,32 +64,50 @@ def main():
     parser = argparse.ArgumentParser(
         description="Run full MetaFlow pipeline: train clients, distill student, evaluate, and save metrics."
     )
-    parser.add_argument("--exp-name", required=True, help="Unique name for this experiment; results written to artifacts/results/<exp_name>.json")
+    parser.add_argument(
+        "--exp-name",
+        default=DEFAULT_EXP_NAME,
+        help="Unique name for this experiment; results written to artifacts/results/<exp_name>.json",
+    )
     parser.add_argument(
         "--coordinator",
-        choices=["confidence", "margin"],
-        default="confidence",
+        choices=["confidence", "margin", "average"],
+        default=DEFAULT_COORDINATOR,
         help="Which coordinator to use when building the teacher MetaFlow.",
     )
     parser.add_argument(
         "--skip-train",
         action="store_true",
+        default=DEFAULT_SKIP_TRAIN,
         help="If provided, the script will not retrain client models; existing checkpoints must be present.",
     )
     parser.add_argument(
         "--distill-epochs",
         type=int,
-        default=5,
+        default=DEFAULT_DISTILL_EPOCHS,
         help="Number of epochs to run distillation for the student.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=DEFAULT_SEED,
+        help="Global random seed for reproducibility.",
     )
     args = parser.parse_args()
 
+    print(
+        f"Running with settings: exp_name={args.exp_name}, "
+        f"coordinator={args.coordinator}, skip_train={args.skip_train}, "
+        f"distill_epochs={args.distill_epochs}, seed={args.seed}"
+    )
+
+    set_seed(args.seed)
     ensure_dirs()
 
     # train or verify clients
     for client in ["a", "b"]:
         ckpt_path = os.path.join(CHECKPOINT_DIR, f"client_{client}.pt")
-        if args.skip-train:
+        if args.skip_train:
             if not os.path.exists(ckpt_path):
                 raise RuntimeError(
                     f"Requested --skip-train but checkpoint for client {client} is missing ({ckpt_path})."
@@ -82,15 +115,17 @@ def main():
             print(f"Skipping training for client {client}, checkpoint exists.")
         else:
             # retrain unconditionally; train_client itself recreates the checkpoint folder.
-            train_client(client)
+            train_client(client, seed=args.seed)
 
     # build teacher MetaFlow
     a_model = load_client_model("a")
     b_model = load_client_model("b")
     if args.coordinator == "confidence":
         coord = ConfidenceSelectCoordinator()
-    else:
+    elif args.coordinator == "margin":
         coord = MarginSelectCoordinator()
+    else:
+        coord = AverageLogitsCoordinator()
 
     teacher = MetaFlow(
         agents=[LocalCNNAgent(a_model, DEVICE), LocalCNNAgent(b_model, DEVICE)],
@@ -98,7 +133,7 @@ def main():
     )
 
     # distill student
-    distill(epochs=args.distill_epochs, coordinator=coord)
+    distill(epochs=args.distill_epochs, coordinator=coord, seed=args.seed)
 
     # evaluation
     test_ds = get_test_dataset()
@@ -114,6 +149,7 @@ def main():
         "exp_name": args.exp_name,
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "coordinator": args.coordinator,
+        "seed": args.seed,
         "acc_client_a": acc_a,
         "acc_client_b": acc_b,
         "acc_teacher": acc_teacher,

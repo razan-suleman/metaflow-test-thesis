@@ -3,12 +3,12 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from metaflow.data import get_probe_dataset
-from metaflow.models.student_model import StudentModel
-from metaflow.core import MetaFlow
-from metaflow.coordinators.confidence_select import ConfidenceSelectCoordinator
-from metaflow.agents.local_cnn_agent import LocalCNNAgent
-from metaflow.evaluate import load_client_model, DEVICE
+from data import get_probe_dataset
+from models.student_model import StudentModel
+from core import MetaFlow
+from coordinators.confidence_select import ConfidenceSelectCoordinator
+from agents.local_cnn_agent import LocalCNNAgent
+from evaluate import load_client_model, DEVICE
 
 CHECKPOINT_DIR = "checkpoints"
 
@@ -19,6 +19,7 @@ def distill(
     lr=1e-3,
     temperature=2.0,
     coordinator=None,  # instance implementing Coordinator protocol
+    seed=42,
 ):
     """Distill a student model using the MetaFlow teacher.
 
@@ -26,6 +27,9 @@ def distill(
     :class:`ConfidenceSelectCoordinator` is constructed.  Pass a different
     coordinator instance to vary the teacher behaviour.
     """
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
     # -------- Teacher: MetaFlow --------
@@ -48,8 +52,10 @@ def distill(
     optimizer = torch.optim.Adam(student.parameters(), lr=lr)
 
     # use probe dataset for distillation so student sees the same inputs used in other parts
-    dataset = get_probe_dataset()
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    dataset = get_probe_dataset(seed=seed)
+    g = torch.Generator()
+    g.manual_seed(seed)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, generator=g)
 
     student.train()
     for epoch in range(epochs):

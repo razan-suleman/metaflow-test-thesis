@@ -1,4 +1,5 @@
 from typing import Tuple
+import torch
 from torch.utils.data import Dataset, Subset, random_split
 from torchvision import datasets, transforms
 
@@ -8,7 +9,7 @@ def _load_mnist(root="./data", train=True):
     return datasets.MNIST(root=root, train=train, download=True, transform=transform)
 
 
-def get_probe_dataset(root="./data", size: int = 5000) -> Dataset:
+def get_probe_dataset(root="./data", size: int = 5000, seed: int = 42) -> Dataset:
     """
     Probe distribution Q(x):
     - no private samples are needed; here we just use a random subset of MNIST train.
@@ -17,7 +18,9 @@ def get_probe_dataset(root="./data", size: int = 5000) -> Dataset:
     full = _load_mnist(root=root, train=True)
     if size >= len(full):
         return full
-    probe, _ = random_split(full, [size, len(full) - size])
+    g = torch.Generator()
+    g.manual_seed(seed)
+    probe, _ = random_split(full, [size, len(full) - size], generator=g)
     return probe
 
 

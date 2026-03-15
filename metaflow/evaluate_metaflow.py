@@ -1,14 +1,14 @@
 import torch
 from torch.utils.data import DataLoader
-from metaflow.coordinators.confidence_select import ConfidenceSelectCoordinator
-from metaflow.coordinators.margin_select import MarginSelectCoordinator
+from coordinators.confidence_select import ConfidenceSelectCoordinator
+from coordinators.margin_select import MarginSelectCoordinator
 
-from metaflow.data import get_test_dataset
+from data import get_test_dataset
 
-from metaflow.core import MetaFlow
-from metaflow.coordinators.confidence_select import ConfidenceSelectCoordinator
-from metaflow.agents.local_cnn_agent import LocalCNNAgent
-from metaflow.evaluate import load_client_model, DEVICE
+from core import MetaFlow
+from coordinators.confidence_select import ConfidenceSelectCoordinator
+from agents.local_cnn_agent import LocalCNNAgent
+from evaluate import load_client_model, DEVICE
 
 
 def evaluate_system(system: MetaFlow, loader: DataLoader) -> float:

@@ -2,9 +2,9 @@ import os
 import torch
 from torch.utils.data import DataLoader
 
-from metaflow.data import get_test_dataset
-from metaflow.models.local_model import LocalCNN
-from metaflow.models.student_model import StudentModel
+from data import get_test_dataset
+from models.local_model import LocalCNN
+from models.student_model import StudentModel
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 CHECKPOINT_DIR = "checkpoints"

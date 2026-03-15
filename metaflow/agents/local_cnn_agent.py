@@ -1,5 +1,5 @@
 import torch
-from metaflow.models.local_model import LocalCNN
+from models.local_model import LocalCNN
 
 class LocalCNNAgent:
     def __init__(self, model: LocalCNN, device: str):
