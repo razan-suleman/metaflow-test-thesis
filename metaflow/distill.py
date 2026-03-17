@@ -7,6 +7,8 @@ from data import get_probe_dataset
 from models.student_model import StudentModel
 from core import MetaFlow
 from coordinators.confidence_select import ConfidenceSelectCoordinator
+from coordinators.margin_select import MarginSelectCoordinator
+from coordinators.agree_then_router import AgreeThenRouterCoordinator
 from agents.local_cnn_agent import LocalCNNAgent
 from evaluate import load_client_model, DEVICE
 
@@ -14,12 +16,13 @@ CHECKPOINT_DIR = "checkpoints"
 
 
 def distill(
-    epochs=5,
+    epochs=20,
     batch_size=128,
     lr=1e-3,
     temperature=2.0,
     coordinator=None,  # instance implementing Coordinator protocol
     seed=42,
+    probe_dataset=None,
 ):
     """Distill a student model using the MetaFlow teacher.
 
@@ -52,7 +55,7 @@ def distill(
     optimizer = torch.optim.Adam(student.parameters(), lr=lr)
 
     # use probe dataset for distillation so student sees the same inputs used in other parts
-    dataset = get_probe_dataset(seed=seed)
+    dataset = probe_dataset if probe_dataset is not None else get_probe_dataset(seed=seed)
     g = torch.Generator()
     g.manual_seed(seed)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, generator=g)
@@ -100,7 +103,7 @@ if __name__ == "__main__":
     parser.add_argument("--temperature", type=float, default=2.0)
     parser.add_argument(
         "--coordinator",
-        choices=["confidence", "margin"],
+        choices=["confidence", "margin", "agree_router"],
         default="confidence",
         help="Which coordinator to use for the teacher MetaFlow.",
     )
@@ -108,8 +111,19 @@ if __name__ == "__main__":
 
     if args.coordinator == "confidence":
         coord = ConfidenceSelectCoordinator()
-    else:
+    elif args.coordinator == "margin":
         coord = MarginSelectCoordinator()
+    else:
+        coord = AgreeThenRouterCoordinator()
+        a_model = load_client_model("a")
+        b_model = load_client_model("b")
+        coord.fit_from_models(
+            a_model,
+            b_model,
+            get_probe_dataset(seed=42),
+            DEVICE,
+            seed=42,
+        )
     distill(
         epochs=args.epochs,
         batch_size=args.batch_size,

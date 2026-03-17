@@ -1,1 +1,2 @@
 from .average_logits import AverageLogitsCoordinator
+from .agree_then_router import AgreeThenRouterCoordinator

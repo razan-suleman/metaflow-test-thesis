@@ -12,7 +12,8 @@ from agents.local_cnn_agent import LocalCNNAgent
 from coordinators.confidence_select import ConfidenceSelectCoordinator
 from coordinators.margin_select import MarginSelectCoordinator
 from coordinators.average_logits import AverageLogitsCoordinator
-from data import get_test_dataset
+from coordinators.agree_then_router import AgreeThenRouterCoordinator
+from data import get_test_dataset, get_probe_dataset
 
 
 def evaluate_system(system, loader):
@@ -42,6 +43,16 @@ def main():
         "Margin":     MarginSelectCoordinator(),
         "Average":    AverageLogitsCoordinator(),
     }
+
+    agree_router = AgreeThenRouterCoordinator()
+    agree_router.fit_from_models(
+        a_model,
+        b_model,
+        get_probe_dataset(seed=42),
+        DEVICE,
+        seed=42,
+    )
+    coordinators["AgreeRouter"] = agree_router
 
     results = {}
     for name, coord in coordinators.items():

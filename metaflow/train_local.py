@@ -26,6 +26,7 @@ def get_client_dataset(client: Literal["a", "b"]):
 
 
 def train_client(client: str, epochs: int = 3, batch_size: int = 64, lr: float = 1e-3, seed: int = 42):
+    # ensure determenisitic behaivior like weight initialization
     random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
@@ -35,16 +36,15 @@ def train_client(client: str, epochs: int = 3, batch_size: int = 64, lr: float =
     dataset = get_client_dataset(client)
     print(f"Client {client} train size: {len(dataset)}")
 
-    # add noise only AFTER dataset exists
+    # add noise 
     if client == "b":
-        from data.noisy_wrapper import NoisyLabelDataset
         dataset = NoisyLabelDataset(dataset, num_classes=10, noise_p=0.2, seed=0)
 
     g = torch.Generator()
-    g.manual_seed(seed)
+    g.manual_seed(seed) # every time you use g, it will produce the same random sequence.
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, generator=g)
 
-    model = local_model.LocalCNN().to(DEVICE)
+    model = local_model.LocalCNN().to(DEVICE) # move the model to the same hardware
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
@@ -53,7 +53,7 @@ def train_client(client: str, epochs: int = 3, batch_size: int = 64, lr: float =
         total_loss = 0.0
         for x, y in loader:
             x, y = x.to(DEVICE), y.to(DEVICE)
-            optimizer.zero_grad()
+            optimizer.zero_grad() # clears the gradients from the previous step.    
             logits = model(x)
             loss = criterion(logits, y)
             loss.backward()
