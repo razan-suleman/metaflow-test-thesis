@@ -64,8 +64,8 @@ def main():
     parser.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2, 3, 4])
     parser.add_argument(
         "--coordinators", nargs="+",
-        choices=[ "margin", "average"],
-        default=["margin", "average"],
+        choices=["confidence", "margin", "ensemble", "agree_router"],
+        default=["ensemble", "margin"],
     )
     parser.add_argument("--distill-epochs", type=int, default=5)
     args = parser.parse_args()

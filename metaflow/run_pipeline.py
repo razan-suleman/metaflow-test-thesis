@@ -19,18 +19,19 @@ from core import MetaFlow
 from agents.local_cnn_agent import LocalCNNAgent
 from coordinators.confidence_select import ConfidenceSelectCoordinator
 from coordinators.margin_select import MarginSelectCoordinator
-from coordinators.average_logits import AverageLogitsCoordinator
 from coordinators.agree_then_router import AgreeThenRouterCoordinator
+from coordinators.EnsembleCoordinator import EnsembleCoordinator
 from data import get_test_dataset, get_probe_dataset, get_probe_splits
 
 # directories used by the pipeline
 ARTIFACTS_DIR = "artifacts"
 RESULTS_DIR = os.path.join(ARTIFACTS_DIR, "results")
 CHECKPOINT_DIR = "checkpoints"
+COORDINATOR_CHOICES = ["confidence", "margin", "ensemble", "agree_router"]
 
 # default experiment settings (used when no CLI flags are provided)
 DEFAULT_EXP_NAME = f"exp_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
-DEFAULT_COORDINATOR = "confidence"
+DEFAULT_COORDINATOR = "ensemble"
 DEFAULT_SKIP_TRAIN = False
 DEFAULT_DISTILL_EPOCHS = 7
 DEFAULT_SEED = 42
@@ -75,6 +76,40 @@ def reset_selection_stats(coordinator) -> None:
         stats["disagree"] = 0
 
 
+def build_coordinator(name: str, a_model, b_model, seed: int):
+    distill_probe_ds = None
+
+    if name == "confidence":
+        coordinator = ConfidenceSelectCoordinator()
+    elif name == "margin":
+        coordinator = MarginSelectCoordinator()
+    elif name == "agree_router":
+        coordinator = AgreeThenRouterCoordinator()
+        router_probe_ds, distill_probe_ds = get_probe_splits(seed=seed)
+        coordinator.fit_from_models(
+            a_model,
+            b_model,
+            router_probe_ds,
+            DEVICE,
+            seed=seed,
+        )
+        print(
+            "Trained agree_router on probe disagreements: "
+            f"samples={coordinator.stats['router_train_samples']}, "
+            f"pos_rate={coordinator.stats['router_train_pos_rate']}, "
+            f"val_acc={coordinator.stats.get('router_val_acc')}, "
+            f"margin_val_acc={coordinator.stats.get('router_margin_baseline_acc')}, "
+            f"enabled={coordinator.stats.get('router_enabled')}"
+        )
+    else:
+        coordinator = EnsembleCoordinator()
+
+    if distill_probe_ds is None:
+        distill_probe_ds = get_probe_dataset(seed=seed)
+
+    return coordinator, distill_probe_ds
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Run full MetaFlow pipeline: train clients, distill student, evaluate, and save metrics."
@@ -86,7 +121,7 @@ def main():
     )
     parser.add_argument(
         "--coordinator",
-        choices=["confidence", "margin", "average", "agree_router"],
+        choices=COORDINATOR_CHOICES,
         default=DEFAULT_COORDINATOR,
         help="Which coordinator to use when building the teacher MetaFlow.",
     )
@@ -135,33 +170,12 @@ def main():
     # build teacher MetaFlow
     a_model = load_client_model("a")
     b_model = load_client_model("b")
-    distill_probe_ds = None
-    if args.coordinator == "confidence":
-        coord = ConfidenceSelectCoordinator()
-    elif args.coordinator == "margin":
-        coord = MarginSelectCoordinator()
-    elif args.coordinator == "agree_router":
-        coord = AgreeThenRouterCoordinator()
-        router_probe_ds, distill_probe_ds = get_probe_splits(seed=args.seed)
-        coord.fit_from_models(
-            a_model,
-            b_model,
-            router_probe_ds,
-            DEVICE,
-            seed=args.seed,
-        )
-        print(
-            "Trained agree_router on probe disagreements: "
-            f"samples={coord.stats['router_train_samples']}, "
-            f"pos_rate={coord.stats['router_train_pos_rate']}, "
-            f"val_acc={coord.stats.get('router_val_acc')}, "
-            f"margin_val_acc={coord.stats.get('router_margin_baseline_acc')}, "
-            f"enabled={coord.stats.get('router_enabled')}"
-        )
-    else:
-        coord = AverageLogitsCoordinator()
-    if distill_probe_ds is None:
-        distill_probe_ds = get_probe_dataset(seed=args.seed)
+    coord, distill_probe_ds = build_coordinator(
+        args.coordinator,
+        a_model,
+        b_model,
+        args.seed,
+    )
 
     teacher = MetaFlow(
         agents=[LocalCNNAgent(a_model, DEVICE), LocalCNNAgent(b_model, DEVICE)],
