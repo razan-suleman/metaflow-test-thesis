@@ -1,12 +1,8 @@
 from typing import Tuple
 import torch
 from torch.utils.data import Dataset, Subset, random_split
-from torchvision import datasets, transforms
 
-
-def _load_mnist(root="./data", train=True):
-    transform = transforms.ToTensor()
-    return datasets.MNIST(root=root, train=train, download=True, transform=transform)
+from . import _load_mnist
 
 
 def get_probe_dataset(root="./data", size: int = 5000, seed: int = 42) -> Dataset:

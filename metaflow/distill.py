@@ -75,8 +75,7 @@ def distill(
                 F.log_softmax(student_logits / temperature, dim=-1),
                 F.softmax(teacher_logits / temperature, dim=-1),
                 reduction="batchmean",
-            )
-
+            )* (temperature ** 2)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()

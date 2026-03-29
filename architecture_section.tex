@@ -1,0 +1,207 @@
+\section{System Architecture}
+\label{sec:architecture}
+
+This section describes the architecture of the MetaFlow multi-agent learning system, including the specialized client models, coordination strategies, and knowledge distillation framework.
+
+\subsection{Overview}
+\label{subsec:overview}
+
+The MetaFlow system consists of three primary components: (1) specialized client models trained on heterogeneous data distributions, (2) coordinator modules that aggregate predictions from multiple clients, and (3) a knowledge distillation pipeline that compresses the multi-agent system into a single student model. Figure~\ref{fig:system_overview} illustrates the overall architecture.
+
+The system addresses the fundamental challenge of collaborative inference in federated settings where individual models possess complementary expertise but no single model achieves optimal performance across the entire input distribution.
+
+\subsection{Client Models}
+\label{subsec:client_models}
+
+We deploy two specialized client models, denoted as Client~A and Client~B, each trained on disjoint subsets of the MNIST dataset to simulate heterogeneous data distributions commonly encountered in federated learning scenarios.
+
+\subsubsection{Client A: Low-Digit Specialist}
+
+Client~A is trained exclusively on digits $\{0, 1, 2\}$ from the MNIST training set. This restricted domain allows the model to develop specialized representations for low-value digits. The training objective is standard cross-entropy classification:
+
+\begin{equation}
+\mathcal{L}_A = -\sum_{i=1}^{N_A} \sum_{c \in \{0,1,2\}} y_i^c \log p_A(c | x_i)
+\end{equation}
+
+where $N_A$ is the number of training samples for Client~A, $y_i^c$ is the one-hot encoded label, and $p_A(c | x_i)$ represents the predicted probability distribution from Client~A.
+
+\subsubsection{Client B: High-Digit Specialist with Label Noise}
+
+Client~B is trained on digits $\{3, 4, 5, 6, 7, 8, 9\}$ with an additional challenge: 20\% symmetric label noise is injected into the training data to simulate realistic data quality issues. This noise is applied by randomly reassigning labels within the valid digit range with probability $p_{\text{noise}} = 0.2$. The training objective remains:
+
+\begin{equation}
+\mathcal{L}_B = -\sum_{i=1}^{N_B} \sum_{c \in \{3,\ldots,9\}} \tilde{y}_i^c \log p_B(c | x_i)
+\end{equation}
+
+where $\tilde{y}_i^c$ denotes the potentially noisy labels. The label noise introduces a robustness challenge and simulates the imperfect data quality often encountered in real-world federated settings.
+
+\subsubsection{Model Architecture}
+
+Both client models share the same convolutional neural network architecture:
+
+\begin{itemize}
+    \item \textbf{Layer 1:} Conv2D(1 $\rightarrow$ 32 channels, kernel=3$\times$3) + ReLU + MaxPool(2$\times$2)
+    \item \textbf{Layer 2:} Conv2D(32 $\rightarrow$ 64 channels, kernel=3$\times$3) + ReLU + MaxPool(2$\times$2)
+    \item \textbf{Layer 3:} Fully connected (64$\times$5$\times$5 $\rightarrow$ 128) + ReLU + Dropout(0.5)
+    \item \textbf{Layer 4:} Fully connected (128 $\rightarrow$ 10) [logits output]
+\end{itemize}
+
+The output layer produces a 10-dimensional logit vector $\mathbf{z} \in \mathbb{R}^{10}$ for all digit classes, even though each model is trained on only a subset of digits.
+
+\subsection{Coordination Strategies}
+\label{subsec:coordinators}
+
+Given predictions from multiple client models, the coordinator must produce a unified prediction. Let $\mathbf{z}_A, \mathbf{z}_B \in \mathbb{R}^{10}$ denote the logit outputs from Client~A and Client~B, respectively. We evaluate five coordination strategies:
+
+\subsubsection{Confidence-Based Selection}
+
+The confidence coordinator selects the prediction from the model exhibiting the highest maximum softmax probability:
+
+\begin{equation}
+\mathbf{z}_{\text{out}} = \begin{cases}
+\mathbf{z}_A & \text{if } \max(\text{softmax}(\mathbf{z}_A)) > \max(\text{softmax}(\mathbf{z}_B)) \\
+\mathbf{z}_B & \text{otherwise}
+\end{cases}
+\end{equation}
+
+This approach assumes that higher confidence correlates with correctness, which may not hold when models are miscalibrated.
+
+\subsubsection{Margin-Based Selection}
+
+The margin coordinator computes the gap between the top two predictions for each model and selects the model with the larger margin:
+
+\begin{equation}
+m_i = p_i^{(1)} - p_i^{(2)}, \quad i \in \{A, B\}
+\end{equation}
+
+where $p_i^{(1)}$ and $p_i^{(2)}$ are the highest and second-highest probabilities from model $i$. The model with larger margin $m_i$ is selected.
+
+\subsubsection{Ensemble Averaging}
+
+The ensemble coordinator averages the logits from both models:
+
+\begin{equation}
+\mathbf{z}_{\text{out}} = \frac{1}{2}(\mathbf{z}_A + \mathbf{z}_B)
+\end{equation}
+
+This approach leverages the wisdom of crowds but may dilute strong predictions with weak ones.
+
+\subsubsection{Average Logits with Softmax}
+
+Similar to ensemble averaging, but applies temperature-scaled softmax before averaging probabilities:
+
+\begin{equation}
+p_{\text{out}}(c) = \frac{1}{2}\left(\text{softmax}(\mathbf{z}_A / \tau)(c) + \text{softmax}(\mathbf{z}_B / \tau)(c)\right)
+\end{equation}
+
+where $\tau$ is the temperature parameter (default $\tau=1.0$).
+
+\subsubsection{Agree-Then-Route Strategy}
+
+The Agree-Then-Route coordinator implements a two-stage decision process:
+
+\begin{enumerate}
+    \item \textbf{Agreement Check:} If $\arg\max(\mathbf{z}_A) = \arg\max(\mathbf{z}_B)$, return either prediction
+    \item \textbf{Disagreement Routing:} If predictions differ, invoke a learned router to select the better model
+\end{enumerate}
+
+This strategy exploits the observation that when both models agree, the prediction is likely correct (approximately 99\% accuracy on agreement cases). The routing problem is thus isolated to the more challenging disagreement cases, which constitute approximately 79--80\% of test samples.
+
+\paragraph{Router Training}
+
+The router is implemented as a binary classifier $r: \mathbb{R}^{10} \rightarrow \{A, B\}$ that takes as input a feature vector $\mathbf{f} \in \mathbb{R}^{10}$ and outputs a model selection decision. For each model's logits $\mathbf{z}_i$, we extract five features:
+
+\begin{align}
+f_1 &= \max(\mathbf{z}_i) \quad \text{(top logit)} \\
+f_2 &= p_i^{(1)} - p_i^{(2)} \quad \text{(margin)} \\
+f_3 &= -\sum_{c=0}^{9} p_i(c) \log p_i(c) \quad \text{(entropy)} \\
+f_4 &= \|\mathbf{z}_i\|_2 \quad \text{(logit norm)} \\
+f_5 &= p_i^{(1)} \quad \text{(confidence)}
+\end{align}
+
+The combined feature vector is $\mathbf{f} = [\mathbf{f}_A; \mathbf{f}_B] \in \mathbb{R}^{10}$, where $[\cdot; \cdot]$ denotes concatenation.
+
+The router is trained on a probe dataset containing samples where the models disagree and exactly one is correct. The training labels are binary: $y=1$ if Client~B is correct, $y=0$ if Client~A is correct. We use binary cross-entropy loss with class balancing:
+
+\begin{equation}
+\mathcal{L}_{\text{router}} = -\frac{1}{N}\sum_{i=1}^{N} w_i \left[y_i \log \sigma(r(\mathbf{f}_i)) + (1-y_i) \log(1-\sigma(r(\mathbf{f}_i)))\right]
+\end{equation}
+
+where $\sigma(\cdot)$ is the sigmoid function and $w_i$ adjusts for class imbalance.
+
+\paragraph{Adaptive Enabling}
+
+The router is only enabled if it achieves validation accuracy exceeding a baseline margin heuristic by at least $\delta = 0.002$:
+
+\begin{equation}
+\text{router\_enabled} = \mathbb{I}[\text{acc}_{\text{router}}^{\text{val}} \geq \text{acc}_{\text{margin}}^{\text{val}} + \delta]
+\end{equation}
+
+This adaptive mechanism prevents overfitting and ensures the learned router provides genuine improvement over simple heuristics.
+
+\subsection{Knowledge Distillation}
+\label{subsec:distillation}
+
+To deploy the multi-agent system efficiently, we compress the MetaFlow ensemble (Client~A + Client~B + Coordinator) into a single student model via knowledge distillation~\cite{hinton2015distilling}.
+
+\subsubsection{Teacher Model}
+
+The teacher is the full MetaFlow system producing soft predictions:
+
+\begin{equation}
+\mathbf{p}_{\text{teacher}} = \text{softmax}(\mathbf{z}_{\text{coordinator}} / \tau)
+\end{equation}
+
+where $\mathbf{z}_{\text{coordinator}}$ is the output from the coordinator (e.g., Agree-Then-Route) and $\tau=2.0$ is the temperature parameter.
+
+\subsubsection{Student Model}
+
+The student model shares the same CNN architecture as the client models but is trained from scratch using the teacher's soft predictions. The distillation loss combines Kullback-Leibler (KL) divergence and hard label cross-entropy:
+
+\begin{equation}
+\mathcal{L}_{\text{distill}} = \alpha \cdot \text{KL}(\mathbf{p}_{\text{teacher}} \| \mathbf{p}_{\text{student}}) + (1-\alpha) \cdot \mathcal{L}_{\text{CE}}(y, \mathbf{p}_{\text{student}})
+\end{equation}
+
+where $\alpha$ controls the balance between soft and hard targets. In our implementation, we use pure soft target learning ($\alpha=1.0$):
+
+\begin{equation}
+\mathcal{L}_{\text{distill}} = \tau^2 \cdot \text{KL}\left(\text{softmax}(\mathbf{z}_{\text{teacher}}/\tau) \,\|\, \text{softmax}(\mathbf{z}_{\text{student}}/\tau)\right)
+\end{equation}
+
+The $\tau^2$ scaling factor compensates for the gradient magnitude reduction caused by temperature scaling.
+
+\subsubsection{Training Protocol}
+
+The student is trained on a separate probe dataset of 5,000 samples using the Adam optimizer with learning rate $10^{-3}$ for 20 epochs. This probe set is disjoint from both the client training data and the router training data to prevent information leakage.
+
+\subsection{Data Partitioning}
+\label{subsec:data_partitioning}
+
+The MNIST dataset (70,000 total samples: 60,000 training + 10,000 test) is partitioned as follows:
+
+\begin{itemize}
+    \item \textbf{Client A Training:} Digits 0--2 from the 60K training set ($\sim$18,000 samples)
+    \item \textbf{Client B Training:} Digits 3--9 from the 60K training set with 20\% label noise ($\sim$42,000 samples)
+    \item \textbf{Router Probe:} 5,000 samples from remaining training data (for router training and validation)
+    \item \textbf{Distillation Probe:} 5,000 samples from remaining training data, disjoint from router probe
+    \item \textbf{Test Set:} Full 10,000 MNIST test samples (all digits, no noise)
+\end{itemize}
+
+This partitioning ensures that coordinator and distillation components are evaluated on the full digit distribution, testing their ability to generalize beyond the specialized training domains of individual clients.
+
+\subsection{Training Pipeline}
+\label{subsec:training_pipeline}
+
+The complete training pipeline proceeds in four stages:
+
+\begin{enumerate}
+    \item \textbf{Client Training:} Train Client~A and Client~B independently on their respective data partitions until convergence (typically 10 epochs each)
+    
+    \item \textbf{Router Training:} Using the trained client models, generate predictions on the router probe dataset and train the disagreement router for 25 epochs
+    
+    \item \textbf{Distillation:} Using the full MetaFlow system (clients + coordinator), generate soft targets on the distillation probe dataset and train the student model for 20 epochs
+    
+    \item \textbf{Evaluation:} Assess all coordinators and the student model on the held-out test set across metrics including overall accuracy, disagreement-only accuracy, and routing decision correctness
+\end{enumerate}
+
+All experiments use deterministic seeding (Python random seed, PyTorch CPU seed, PyTorch CUDA seed) to ensure reproducibility.
