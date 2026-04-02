@@ -209,7 +209,7 @@ class AgreeThenRouterCoordinator:
         feature_mean = train_features.mean(dim=0, keepdim=True)  # Mean of each feature
         feature_std = train_features.std(dim=0, keepdim=True).clamp_min(1e-6)  # Std, avoid div by 0
 
-        # Apply standardization (mean=0, std=1) to both sets using TRAIN statistics
+        # Apply standardization (mean=0, std=1) to both sets using TRAIN statistics to prevent data leakage
         train_features = (train_features - feature_mean) / feature_std
         val_features = (val_features - feature_mean) / feature_std
 
@@ -217,7 +217,7 @@ class AgreeThenRouterCoordinator:
         margin_a = features[val_idx][:, 1]  # Model A's margin feature (column 1)
         margin_b = features[val_idx][:, 6]  # Model B's margin feature (column 6)
         margin_choose_b = margin_b > margin_a  # True if margin heuristic picks B
-        margin_acc = (margin_choose_b == (val_labels > 0.5)).float().mean().item()
+        margin_acc = (margin_choose_b == (val_labels > 0.5)).float().mean().item() # how many times is the confident model correct
 
         # Initialize router and optimizer
         self.router = _DisagreementRouter(in_features=features.size(1)).to(device)
@@ -230,6 +230,7 @@ class AgreeThenRouterCoordinator:
         val_labels = val_labels.to(device)
 
         # Handle class imbalance: weight positive class (pick B) inversely to its frequency
+        # weight for weigted BCE
         pos = train_labels.sum().item()  # Number of "pick B" labels
         neg = train_labels.numel() - pos  # Number of "pick A" labels
         pos_weight_value = (neg / max(pos, 1.0))  # Higher weight if B is rare
