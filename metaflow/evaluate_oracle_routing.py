@@ -73,7 +73,7 @@ def main():
     acc_margin = evaluate_system(margin, test_loader)
     acc_avg = evaluate_system(average, test_loader)
 
-    print("\n=== Oracle Routing Upper Bound (MNIST test) ===\n")
+    print("\n=== Oracle Routing Upper Bound (CIFAR-10 test) ===\n")
     print(f"Client A accuracy        : {acc_a:.4%}")
     print(f"Client B accuracy        : {acc_b:.4%}")
     print(f"Oracle routing accuracy  : {acc_oracle:.4%}")

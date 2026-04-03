@@ -2,12 +2,19 @@
 import torch
 from torch.utils.data import Subset
 from torchvision import datasets, transforms
-from .split_client_a import _load_mnist
+from .split_client_a import _load_cifar10
 
 
 def get_client_b_dataset(root="./data", train=True):
-    full = _load_mnist(root=root, train=train)
-    indices = [i for i, (_, y) in enumerate(full) if y in {3,4,5,6,7,8,9}]
+    """Client B: all animals including overlap.
+    
+    CIFAR-10 classes:
+    2-bird, 3-cat, 4-deer, 5-dog, 6-frog, 7-horse
+    Overlaps with Client A on bird(2) for realistic routing challenge.
+    """
+    full = _load_cifar10(root=root, train=train)
+    allowed = {2, 3, 4, 5, 6, 7}  # animals including overlap
+    indices = [i for i, (_, y) in enumerate(full) if y in allowed]
     return Subset(full, indices)
 
 

@@ -13,6 +13,7 @@ from coordinators.confidence_select import ConfidenceSelectCoordinator
 from coordinators.margin_select import MarginSelectCoordinator
 from coordinators.average_logits import AverageLogitsCoordinator
 from coordinators.agree_then_router import AgreeThenRouterCoordinator
+from coordinators.neural_router import create_neural_router_coordinator
 from data import get_test_dataset, get_probe_dataset
 
 
@@ -53,6 +54,15 @@ def main():
         seed=42,
     )
     coordinators["AgreeRouter"] = agree_router
+    
+    # Train neural router coordinator
+    probe_data = get_probe_dataset(seed=42)
+    probe_loader = DataLoader(probe_data, batch_size=64, shuffle=False)
+    neural_router_coord = create_neural_router_coordinator(
+        a_model, b_model, probe_loader, device=DEVICE, epochs=50
+    )
+    from coordinators.neural_router import NeuralRouterWrapper
+    coordinators["NeuralRouter"] = NeuralRouterWrapper(neural_router_coord)
 
     results = {}
     for name, coord in coordinators.items():
@@ -62,7 +72,7 @@ def main():
         acc = evaluate_system(system, test_loader)
         results[name] = acc
 
-    print("\n=== Coordinator Comparison (Teacher Accuracy on MNIST Test) ===\n")
+    print("\n=== Coordinator Comparison (Teacher Accuracy on CIFAR-10 Test) ===\n")
     print(f"  Client A alone : {acc_a:.4%}")
     print(f"  Client B alone : {acc_b:.4%}")
     print()

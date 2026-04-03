@@ -25,7 +25,7 @@ def get_client_dataset(client: Literal["a", "b"]):
         raise ValueError("client must be 'a' or 'b'")
 
 
-def train_client(client: str, epochs: int = 3, batch_size: int = 64, lr: float = 1e-3, seed: int = 42):
+def train_client(client: str, epochs: int = 40, batch_size: int = 128, lr: float = 1e-3, seed: int = 42):
     # ensure determenisitic behaivior like weight initialization
     random.seed(seed)
     torch.manual_seed(seed)
@@ -46,7 +46,10 @@ def train_client(client: str, epochs: int = 3, batch_size: int = 64, lr: float =
 
     model = local_model.LocalCNN().to(DEVICE) # move the model to the same hardware
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=5e-4)
+    
+    # Learning rate scheduler
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
 
     for epoch in range(epochs):
         model.train()
@@ -61,7 +64,10 @@ def train_client(client: str, epochs: int = 3, batch_size: int = 64, lr: float =
             total_loss += loss.item() * x.size(0)
 
         avg_loss = total_loss / len(loader.dataset)
-        print(f"Client {client} | Epoch {epoch+1}/{epochs} | Loss: {avg_loss:.4f}")
+        scheduler.step(avg_loss)
+        
+        if (epoch + 1) % 5 == 0 or epoch == 0:
+            print(f"Client {client} | Epoch {epoch+1}/{epochs} | Loss: {avg_loss:.4f} | LR: {optimizer.param_groups[0]['lr']:.6f}")
 
     ckpt_path = os.path.join(CHECKPOINT_DIR, f"client_{client}.pt")
     torch.save(model.state_dict(), ckpt_path)
