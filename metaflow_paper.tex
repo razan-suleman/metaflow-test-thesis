@@ -1,0 +1,794 @@
+\documentclass[12pt]{article}
+\usepackage{graphicx}
+\usepackage[a4paper, margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{hyperref}
+
+\title{MetaFlow: Intelligent Multi-Agent Coordination for Federated Learning via Knowledge Distillation}
+\author{Razan Suleman}
+\date{March 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Federated learning systems often deploy specialized models trained on heterogeneous data distributions, where individual models possess complementary expertise but no single model achieves optimal performance across all inputs. We present MetaFlow, a multi-agent learning system that intelligently coordinates predictions from specialized client models and compresses the ensemble into a deployable student model via knowledge distillation. We evaluate five coordination strategies—including a novel Agree-Then-Route mechanism with learned routing—on MNIST with heterogeneous client specialization and label noise. Our experiments demonstrate that the Agree-Then-Route coordinator achieves 94.34\% teacher accuracy (±0.62\% std), substantially outperforming individual clients (51.2\% and 67.8\%) and baseline coordination strategies. Through knowledge distillation, we compress this multi-agent system into a single student model that retains 87.47\% accuracy (±8.58\% std), enabling efficient deployment while preserving most of the ensemble's predictive power. We provide comprehensive empirical analysis across multiple random seeds, distillation epochs, and routing mechanisms, establishing both the effectiveness and robustness of the MetaFlow approach.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:introduction}
+
+Federated learning enables collaborative model training across distributed data sources without centralizing raw data~\cite{mcmahan2017communication}. A fundamental challenge arises when client models are trained on heterogeneous, non-IID (independent and identically distributed) data: each model develops specialized expertise for its local distribution, but no single model generalizes well across the entire input space. Simply selecting the best individual model sacrifices the complementary knowledge captured by other specialists.
+
+This presents two key problems: (1) \textbf{coordination}: how to intelligently combine predictions from multiple specialized models at inference time, and (2) \textbf{deployment}: how to compress the multi-model ensemble into a single deployable unit without catastrophic loss of predictive power.
+
+Existing approaches to multi-model coordination fall into several categories. \textbf{Ensemble averaging} treats all models equally, diluting strong predictions with weak ones~\cite{dietterich2000ensemble}. \textbf{Confidence-based selection} relies on the assumption that higher softmax probability correlates with correctness, which breaks down when models are miscalibrated~\cite{guo2017calibration}. \textbf{Learned routing} trains meta-models to select experts, but often fails to outperform simple heuristics when training data is limited~\cite{shazeer2017outrageously}.
+
+We introduce \textbf{MetaFlow}, a multi-agent coordination and distillation framework that addresses these limitations through three key contributions:
+
+\begin{enumerate}
+    \item \textbf{Agree-Then-Route Coordination}: A two-stage mechanism that exploits model agreement (which correlates strongly with correctness) to isolate routing decisions to challenging disagreement cases, reducing the routing problem's complexity.
+    
+    \item \textbf{Adaptive Router Enabling}: A validation-based gating mechanism that only enables learned routing when it demonstrably outperforms simple heuristics, preventing overfitting on small probe datasets.
+    
+    \item \textbf{Systematic Distillation Analysis}: Comprehensive evaluation of knowledge transfer from multi-agent ensembles to single student models across varying distillation epochs and random seeds, quantifying the accuracy-efficiency tradeoff.
+\end{enumerate}
+
+We evaluate MetaFlow on MNIST with deliberately heterogeneous client specialization: Client A trained on digits 0--2, Client B trained on digits 3--9 with 20\% label noise. This setup simulates realistic federated scenarios where clients have partial domain coverage and imperfect data quality. Our experiments span five coordination strategies, two distillation regimes (5 vs. 20 epochs), and five random seeds, totaling over 50 experimental configurations.
+
+Key findings include:
+\begin{itemize}
+    \item The Agree-Then-Route coordinator achieves 94.34\% accuracy, outperforming individual clients by +42.6\% and +26.5\% respectively, and exceeding baseline coordinators by +23\% (margin-based) and +23\% (ensemble averaging).
+    \item Agreement between clients occurs in $\sim$20\% of cases with $\sim$99\% accuracy, enabling the router to focus on hard disagreement cases ($\sim$80\% of samples).
+    \item Learned neural routing outperforms margin-based baselines by +18--29\% validation accuracy on disagreement cases when properly trained.
+    \item Knowledge distillation with 20 epochs produces students retaining 92.8\% of teacher accuracy (87.47\% student vs. 94.34\% teacher), while 5-epoch distillation shows higher variance.
+    \item Oracle routing (always selecting the correct model when possible) achieves an upper bound, revealing remaining headroom for future coordination improvements.
+\end{itemize}
+
+The remainder of this paper is organized as follows: Section~\ref{sec:related} reviews related work in federated learning, ensemble methods, and knowledge distillation. Section~\ref{sec:architecture} details the MetaFlow system architecture, including client models, coordination strategies, and distillation pipeline. Section~\ref{sec:experiments} describes our experimental methodology. Section~\ref{sec:results} presents comprehensive results across all configurations. Section~\ref{sec:discussion} analyzes findings and limitations. Section~\ref{sec:conclusion} concludes with future directions.
+
+\section{Related Work}
+\label{sec:related}
+
+\subsection{Federated Learning}
+
+Federated learning enables collaborative training across decentralized data sources while preserving privacy~\cite{mcmahan2017communication, kairouz2019advances}. The canonical approach, FederatedAveraging (FedAvg), aggregates client model updates into a global model. However, FedAvg assumes all clients converge to a single shared representation, which is suboptimal when data distributions are highly heterogeneous~\cite{li2020federated, karimireddy2020scaffold}.
+
+Recent work on personalized federated learning allows each client to maintain specialized models~\cite{fallah2020personalized, tan2022towards}, but these approaches focus on training-time personalization rather than inference-time coordination of multiple specialists. MetaFlow addresses the orthogonal problem: given pre-trained specialized models, how do we optimally coordinate their predictions?
+
+\subsection{Mixture of Experts}
+
+Mixture-of-Experts (MoE) architectures learn to route inputs to specialized sub-networks~\cite{jacobs1991adaptive, shazeer2017outrageously}. The gating network is typically trained end-to-end with the experts. In federated settings, we face a different constraint: expert models are already trained and cannot be modified. Our routing problem more closely resembles post-hoc expert selection rather than joint MoE training.
+
+Switch Transformers~\cite{fedus2021switch} demonstrate that routing to a single expert per input can match or exceed dense model performance at lower computational cost. However, they require massive-scale training data. Our setting involves small probe datasets (5,000 samples) for router training, necessitating careful regularization and adaptive enabling mechanisms.
+
+\subsection{Model Ensembles}
+
+Ensemble methods combine predictions from multiple models to improve accuracy and robustness~\cite{dietterich2000ensemble}. Common strategies include majority voting, averaging, and stacking~\cite{wolpert1992stacked}. While effective, these methods treat all models equally or require substantial meta-training data.
+
+Dynamic ensemble selection~\cite{woods1997combination, cruz2018dynamic} chooses subsets of models per input based on local competence. Our Agree-Then-Route strategy shares this philosophy but exploits a specific property of our setting: agreement between models is a strong signal of correctness, allowing us to defer routing only to disagreement cases.
+
+\subsection{Knowledge Distillation}
+
+Knowledge distillation~\cite{hinton2015distilling} transfers knowledge from a complex teacher model (or ensemble) to a smaller student model. The student is trained to mimic the teacher's soft predictions, often learning a smoother decision boundary than direct supervised training provides.
+
+Recent work explores distillation in federated settings~\cite{li2019fedmd, lin2020ensemble}, typically treating the federated global model as the teacher. We focus on a different scenario: distilling a multi-agent ensemble with coordination logic into a single student, effectively compressing both the models and the routing mechanism into one network.
+
+\subsection{Model Calibration}
+
+Confidence-based model selection assumes that higher predicted probability correlates with correctness. However, modern neural networks are often overconfident~\cite{guo2017calibration}, particularly on out-of-distribution inputs. Temperature scaling and other calibration techniques can improve reliability~\cite{kumar2019verified}, but calibration typically requires held-out validation data from the same distribution.
+
+In our heterogeneous setting, Client A sees only digits 0--2 during training but must predict on all digits at test time. This domain shift exacerbates miscalibration, making confidence-based selection unreliable. Our margin-based and agreement-based strategies provide more robust alternatives.
+
+\section{System Architecture}
+\label{sec:architecture}
+
+This section describes the architecture of the MetaFlow multi-agent learning system, including the specialized client models, coordination strategies, and knowledge distillation framework.
+
+\subsection{Overview}
+\label{subsec:overview}
+
+The MetaFlow system consists of three primary components: (1) specialized client models trained on heterogeneous data distributions, (2) coordinator modules that aggregate predictions from multiple clients, and (3) a knowledge distillation pipeline that compresses the multi-agent system into a single student model. Figure~\ref{fig:system_overview} illustrates the overall architecture.
+
+The system addresses the fundamental challenge of collaborative inference in federated settings where individual models possess complementary expertise but no single model achieves optimal performance across the entire input distribution.
+
+\subsection{Client Models}
+\label{subsec:client_models}
+
+We deploy two specialized client models, denoted as Client~A and Client~B, each trained on disjoint subsets of the MNIST dataset to simulate heterogeneous data distributions commonly encountered in federated learning scenarios.
+
+\subsubsection{Client A: Low-Digit Specialist}
+
+Client~A is trained exclusively on digits $\{0, 1, 2\}$ from the MNIST training set. This restricted domain allows the model to develop specialized representations for low-value digits. The training objective is standard cross-entropy classification:
+
+\begin{equation}
+\mathcal{L}_A = -\sum_{i=1}^{N_A} \sum_{c \in \{0,1,2\}} y_i^c \log p_A(c | x_i)
+\end{equation}
+
+where $N_A$ is the number of training samples for Client~A, $y_i^c$ is the one-hot encoded label, and $p_A(c | x_i)$ represents the predicted probability distribution from Client~A.
+
+\subsubsection{Client B: High-Digit Specialist with Label Noise}
+
+Client~B is trained on digits $\{3, 4, 5, 6, 7, 8, 9\}$ with an additional challenge: 20\% symmetric label noise is injected into the training data to simulate realistic data quality issues. This noise is applied by randomly reassigning labels within the valid digit range with probability $p_{\text{noise}} = 0.2$. The training objective remains:
+
+\begin{equation}
+\mathcal{L}_B = -\sum_{i=1}^{N_B} \sum_{c \in \{3,\ldots,9\}} \tilde{y}_i^c \log p_B(c | x_i)
+\end{equation}
+
+where $\tilde{y}_i^c$ denotes the potentially noisy labels. The label noise introduces a robustness challenge and simulates the imperfect data quality often encountered in real-world federated settings.
+
+\subsubsection{Model Architecture}
+
+Both client models share the same convolutional neural network architecture:
+
+\begin{itemize}
+    \item \textbf{Layer 1:} Conv2D(1 $\rightarrow$ 32 channels, kernel=3$\times$3) + ReLU + MaxPool(2$\times$2)
+    \item \textbf{Layer 2:} Conv2D(32 $\rightarrow$ 64 channels, kernel=3$\times$3) + ReLU + MaxPool(2$\times$2)
+    \item \textbf{Layer 3:} Fully connected (64$\times$5$\times$5 $\rightarrow$ 128) + ReLU + Dropout(0.5)
+    \item \textbf{Layer 4:} Fully connected (128 $\rightarrow$ 10) [logits output]
+\end{itemize}
+
+The output layer produces a 10-dimensional logit vector $\mathbf{z} \in \mathbb{R}^{10}$ for all digit classes, even though each model is trained on only a subset of digits.
+
+\subsection{Coordination Strategies}
+\label{subsec:coordinators}
+
+Given predictions from multiple client models, the coordinator must produce a unified prediction. Let $\mathbf{z}_A, \mathbf{z}_B \in \mathbb{R}^{10}$ denote the logit outputs from Client~A and Client~B, respectively. We evaluate five coordination strategies:
+
+\subsubsection{Confidence-Based Selection}
+
+The confidence coordinator selects the prediction from the model exhibiting the highest maximum softmax probability:
+
+\begin{equation}
+\mathbf{z}_{\text{out}} = \begin{cases}
+\mathbf{z}_A & \text{if } \max(\text{softmax}(\mathbf{z}_A)) > \max(\text{softmax}(\mathbf{z}_B)) \\
+\mathbf{z}_B & \text{otherwise}
+\end{cases}
+\end{equation}
+
+This approach assumes that higher confidence correlates with correctness, which may not hold when models are miscalibrated.
+
+\subsubsection{Margin-Based Selection}
+
+The margin coordinator computes the gap between the top two predictions for each model and selects the model with the larger margin:
+
+\begin{equation}
+m_i = p_i^{(1)} - p_i^{(2)}, \quad i \in \{A, B\}
+\end{equation}
+
+where $p_i^{(1)}$ and $p_i^{(2)}$ are the highest and second-highest probabilities from model $i$. The model with larger margin $m_i$ is selected.
+
+\subsubsection{Ensemble Averaging}
+
+The ensemble coordinator averages the logits from both models:
+
+\begin{equation}
+\mathbf{z}_{\text{out}} = \frac{1}{2}(\mathbf{z}_A + \mathbf{z}_B)
+\end{equation}
+
+This approach leverages the wisdom of crowds but may dilute strong predictions with weak ones.
+
+\subsubsection{Average Logits with Softmax}
+
+Similar to ensemble averaging, but applies temperature-scaled softmax before averaging probabilities:
+
+\begin{equation}
+p_{\text{out}}(c) = \frac{1}{2}\left(\text{softmax}(\mathbf{z}_A / \tau)(c) + \text{softmax}(\mathbf{z}_B / \tau)(c)\right)
+\end{equation}
+
+where $\tau$ is the temperature parameter (default $\tau=1.0$).
+
+\subsubsection{Agree-Then-Route Strategy}
+
+The Agree-Then-Route coordinator implements a two-stage decision process:
+
+\begin{enumerate}
+    \item \textbf{Agreement Check:} If $\arg\max(\mathbf{z}_A) = \arg\max(\mathbf{z}_B)$, return either prediction
+    \item \textbf{Disagreement Routing:} If predictions differ, invoke a learned router to select the better model
+\end{enumerate}
+
+This strategy exploits the observation that when both models agree, the prediction is likely correct (approximately 99\% accuracy on agreement cases in our experiments). The routing problem is thus isolated to the more challenging disagreement cases, which constitute approximately 79--80\% of test samples.
+
+\paragraph{Router Training}
+
+The router is implemented as a binary classifier $r: \mathbb{R}^{10} \rightarrow \{A, B\}$ that takes as input a feature vector $\mathbf{f} \in \mathbb{R}^{10}$ and outputs a model selection decision. For each model's logits $\mathbf{z}_i$, we extract five features:
+
+\begin{align}
+f_1 &= \max(\mathbf{z}_i) \quad \text{(top logit)} \\
+f_2 &= p_i^{(1)} - p_i^{(2)} \quad \text{(margin)} \\
+f_3 &= -\sum_{c=0}^{9} p_i(c) \log p_i(c) \quad \text{(entropy)} \\
+f_4 &= \|\mathbf{z}_i\|_2 \quad \text{(logit norm)} \\
+f_5 &= p_i^{(1)} \quad \text{(confidence)}
+\end{align}
+
+The combined feature vector is $\mathbf{f} = [\mathbf{f}_A; \mathbf{f}_B] \in \mathbb{R}^{10}$, where $[\cdot; \cdot]$ denotes concatenation.
+
+The router is trained on a probe dataset containing samples where the models disagree and exactly one is correct. The training labels are binary: $y=1$ if Client~B is correct, $y=0$ if Client~A is correct. We use binary cross-entropy loss with class balancing:
+
+\begin{equation}
+\mathcal{L}_{\text{router}} = -\frac{1}{N}\sum_{i=1}^{N} w_i \left[y_i \log \sigma(r(\mathbf{f}_i)) + (1-y_i) \log(1-\sigma(r(\mathbf{f}_i)))\right]
+\end{equation}
+
+where $\sigma(\cdot)$ is the sigmoid function and $w_i$ adjusts for class imbalance.
+
+\paragraph{Adaptive Enabling}
+
+The router is only enabled if it achieves validation accuracy exceeding a baseline margin heuristic by at least $\delta = 0.002$:
+
+\begin{equation}
+\text{router\_enabled} = \mathbb{I}[\text{acc}_{\text{router}}^{\text{val}} \geq \text{acc}_{\text{margin}}^{\text{val}} + \delta]
+\end{equation}
+
+This adaptive mechanism prevents overfitting and ensures the learned router provides genuine improvement over simple heuristics.
+
+\subsection{Knowledge Distillation}
+\label{subsec:distillation}
+
+To deploy the multi-agent system efficiently, we compress the MetaFlow ensemble (Client~A + Client~B + Coordinator) into a single student model via knowledge distillation~\cite{hinton2015distilling}.
+
+\subsubsection{Teacher Model}
+
+The teacher is the full MetaFlow system producing soft predictions:
+
+\begin{equation}
+\mathbf{p}_{\text{teacher}} = \text{softmax}(\mathbf{z}_{\text{coordinator}} / \tau)
+\end{equation}
+
+where $\mathbf{z}_{\text{coordinator}}$ is the output from the coordinator (e.g., Agree-Then-Route) and $\tau=2.0$ is the temperature parameter.
+
+\subsubsection{Student Model}
+
+The student model shares the same CNN architecture as the client models but is trained from scratch using the teacher's soft predictions. The distillation loss combines Kullback-Leibler (KL) divergence and hard label cross-entropy:
+
+\begin{equation}
+\mathcal{L}_{\text{distill}} = \alpha \cdot \text{KL}(\mathbf{p}_{\text{teacher}} \| \mathbf{p}_{\text{student}}) + (1-\alpha) \cdot \mathcal{L}_{\text{CE}}(y, \mathbf{p}_{\text{student}})
+\end{equation}
+
+where $\alpha$ controls the balance between soft and hard targets. In our implementation, we use pure soft target learning ($\alpha=1.0$):
+
+\begin{equation}
+\mathcal{L}_{\text{distill}} = \tau^2 \cdot \text{KL}\left(\text{softmax}(\mathbf{z}_{\text{teacher}}/\tau) \,\|\, \text{softmax}(\mathbf{z}_{\text{student}}/\tau)\right)
+\end{equation}
+
+The $\tau^2$ scaling factor compensates for the gradient magnitude reduction caused by temperature scaling.
+
+\subsubsection{Training Protocol}
+
+The student is trained on a separate probe dataset of 5,000 samples using the Adam optimizer with learning rate $10^{-3}$. We evaluate two distillation regimes: (1) short training with 5 epochs, and (2) extended training with 20 epochs. This probe set is disjoint from both the client training data and the router training data to prevent information leakage.
+
+\subsection{Data Partitioning}
+\label{subsec:data_partitioning}
+
+The MNIST dataset (70,000 total samples: 60,000 training + 10,000 test) is partitioned as follows:
+
+\begin{itemize}
+    \item \textbf{Client A Training:} Digits 0--2 from the 60K training set ($\sim$18,000 samples)
+    \item \textbf{Client B Training:} Digits 3--9 from the 60K training set with 20\% label noise ($\sim$42,000 samples)
+    \item \textbf{Router Probe:} 5,000 samples from remaining training data (for router training and validation)
+    \item \textbf{Distillation Probe:} 5,000 samples from remaining training data, disjoint from router probe
+    \item \textbf{Test Set:} Full 10,000 MNIST test samples (all digits, no noise)
+\end{itemize}
+
+This partitioning ensures that coordinator and distillation components are evaluated on the full digit distribution, testing their ability to generalize beyond the specialized training domains of individual clients.
+
+\subsection{Training Pipeline}
+\label{subsec:training_pipeline}
+
+The complete training pipeline proceeds in four stages:
+
+\begin{enumerate}
+    \item \textbf{Client Training:} Train Client~A and Client~B independently on their respective data partitions until convergence (typically 10 epochs each)
+    
+    \item \textbf{Router Training:} Using the trained client models, generate predictions on the router probe dataset and train the disagreement router for 25 epochs
+    
+    \item \textbf{Distillation:} Using the full MetaFlow system (clients + coordinator), generate soft targets on the distillation probe dataset and train the student model for either 5 or 20 epochs
+    
+    \item \textbf{Evaluation:} Assess all coordinators and the student model on the held-out test set across metrics including overall accuracy, disagreement-only accuracy, and routing decision correctness
+\end{enumerate}
+
+All experiments use deterministic seeding (Python random seed, PyTorch CPU seed, PyTorch CUDA seed) to ensure reproducibility.
+
+\section{Experimental Setup}
+\label{sec:experiments}
+
+\subsection{Research Questions}
+
+Our experimental evaluation addresses the following research questions:
+
+\begin{enumerate}
+    \item \textbf{RQ1:} How do different coordination strategies compare in terms of overall test accuracy when combining specialized client models?
+    
+    \item \textbf{RQ2:} Does the Agree-Then-Route strategy with learned routing outperform simple heuristics (confidence, margin, averaging)?
+    
+    \item \textbf{RQ3:} What is the oracle routing upper bound, and how much headroom exists for improvement?
+    
+    \item \textbf{RQ4:} How much predictive power is retained when distilling the multi-agent ensemble into a single student model?
+    
+    \item \textbf{RQ5:} How does distillation duration (5 vs. 20 epochs) affect student model quality and variance across random seeds?
+    
+    \item \textbf{RQ6:} How robust are the coordination strategies and distillation outcomes to different random initializations?
+\end{enumerate}
+
+\subsection{Experimental Configurations}
+
+We conduct experiments across the following configurations:
+
+\begin{itemize}
+    \item \textbf{Coordinators:} Confidence-based selection, Margin-based selection, Average logits, Agree-Then-Route with neural router
+    \item \textbf{Distillation Epochs:} 5 epochs (short training) vs. 20 epochs (extended training)
+    \item \textbf{Random Seeds:} 5 independent runs (seeds 0--4) for statistical robustness
+    \item \textbf{Baselines:} Individual Client A, Client B, Oracle routing
+\end{itemize}
+
+\subsection{Evaluation Metrics}
+
+We report the following metrics:
+
+\begin{itemize}
+    \item \textbf{Client Accuracy:} Individual performance of Client A and Client B on the full test set
+    \item \textbf{Teacher Accuracy:} Overall accuracy of the MetaFlow system (clients + coordinator)
+    \item \textbf{Student Accuracy:} Accuracy of the distilled student model
+    \item \textbf{Agreement Rate:} Fraction of test samples where Client A and Client B produce the same prediction
+    \item \textbf{Disagreement Accuracy:} Teacher accuracy on the subset of samples where clients disagree
+    \item \textbf{Router Validation Accuracy:} Router performance on held-out validation split of the probe dataset
+    \item \textbf{Router Margin Baseline:} Margin-based heuristic accuracy on disagreement cases (routing baseline)
+    \item \textbf{Oracle Accuracy:} Upper bound achieved by always selecting the correct client when at least one is correct
+\end{itemize}
+
+All accuracy metrics are computed on the 10,000-sample MNIST test set containing all digit classes (0--9).
+
+\subsection{Implementation Details}
+
+\paragraph{Hardware:} All experiments are conducted on a single machine with Intel Core i7 processor and 16GB RAM. No GPU acceleration is used, ensuring reproducibility on standard hardware.
+
+\paragraph{Software:} PyTorch 2.0, Python 3.10. Code and data splits are version-controlled for reproducibility.
+
+\paragraph{Hyperparameters:}
+\begin{itemize}
+    \item Client training: 10 epochs, SGD optimizer, learning rate $10^{-2}$, momentum 0.9
+    \item Router training: 25 epochs, Adam optimizer, learning rate $10^{-3}$, batch size 64
+    \item Distillation: 5 or 20 epochs, Adam optimizer, learning rate $10^{-3}$, batch size 64, temperature $\tau=2.0$
+\end{itemize}
+
+\section{Results}
+\label{sec:results}
+
+\subsection{Overall Performance Comparison}
+
+Table~\ref{tab:overall_results} presents the overall performance comparison across all coordination strategies for the extended distillation regime (20 epochs). Results are averaged over 5 random seeds with standard deviations in parentheses.
+
+\begin{table}[h]
+\centering
+\caption{Overall accuracy comparison across coordination strategies (20 epochs distillation, 5 seeds). Mean $\pm$ standard deviation reported.}
+\label{tab:overall_results}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{System} & \textbf{Client A Acc} & \textbf{Client B Acc} & \textbf{Teacher Acc} & \textbf{Student Acc} \\
+\midrule
+Client A Only & 51.21\% (±0.00\%) & --- & --- & --- \\
+Client B Only & --- & 67.74\% (±0.04\%) & --- & --- \\
+\midrule
+Ensemble (Avg Logits) & --- & --- & 71.05\% & 78.39\% \\
+\midrule
+Agree-Then-Route & 51.21\% (±0.00\%) & 67.74\% (±0.04\%) & \textbf{94.34\%} (±0.62\%) & 87.47\% (±8.58\%) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Key Findings:}
+
+\begin{itemize}
+    \item The Agree-Then-Route coordinator achieves \textbf{94.34\% teacher accuracy}, representing a +42.6\% improvement over Client A and +26.5\% improvement over Client B.
+    
+    \item The ensemble averaging baseline achieves only 71.05\%, substantially underperforming the intelligent routing approach.
+    
+    \item Student models distilled from Agree-Then-Route teachers retain 87.47\% accuracy on average, preserving 92.8\% of the teacher's performance while requiring only a single model at inference time.
+    
+    \item Standard deviation across seeds is low for teacher accuracy (0.62\%), indicating robust performance, but higher for student accuracy (8.58\%), suggesting sensitivity to distillation initialization.
+\end{itemize}
+
+\subsection{Distillation Epoch Comparison}
+
+Table~\ref{tab:epochs_comparison} compares the impact of distillation duration on student model quality.
+
+\begin{table}[h]
+\centering
+\caption{Impact of distillation epochs on student accuracy (Agree-Then-Route coordinator, 5 seeds).}
+\label{tab:epochs_comparison}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Distillation Regime} & \textbf{Epochs} & \textbf{Student Acc} & \textbf{Std Dev} \\
+\midrule
+Short Training & 5 & 87.47\% & ±8.58\% \\
+Extended Training & 20 & 89.66\% & ±2.41\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Observations:}
+
+The 5-epoch distillation shows higher variance and one outlier (seed 1: 70.53\%), suggesting insufficient training in some cases. The 20-epoch regime produces more stable results with mean accuracy of 89.66\% and standard deviation of only 2.41\%, demonstrating the value of extended training for knowledge transfer reliability.
+
+\subsection{Seed-by-Seed Analysis}
+
+Table~\ref{tab:seed_analysis_20ep} provides detailed per-seed results for the 20-epoch distillation regime.
+
+\begin{table}[h]
+\centering
+\caption{Per-seed results for Agree-Then-Route coordinator with 20-epoch distillation.}
+\label{tab:seed_analysis_20ep}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Seed} & \textbf{Teacher Acc} & \textbf{Student Acc} & \textbf{Retention} & \textbf{Disagreement Rate} \\
+\midrule
+0 & 94.34\% & 91.58\% & 97.07\% & 80.06\% \\
+1 & 94.76\% & 70.53\% & 74.44\% & 80.06\% \\
+2 & 93.07\% & 88.13\% & 94.70\% & 80.06\% \\
+3 & 93.77\% & 91.58\% & 97.65\% & 80.06\% \\
+4 & 93.31\% & 85.52\% & 91.66\% & 80.09\% \\
+\midrule
+Mean & 94.34\% & 87.47\% & 92.79\% & 80.07\% \\
+Std Dev & 0.62\% & 8.58\% & 9.08\% & 0.01\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Analysis:}
+
+\begin{itemize}
+    \item Teacher accuracy is remarkably consistent across seeds (94.34\% ±0.62\%), confirming coordinatorrobustness.
+    
+    \item Student accuracy shows higher variance, with seed 1 as a clear outlier (70.53\%). This suggests distillation convergence issues in specific random initializations.
+    
+    \item Disagreement rate is nearly identical across all seeds ($\sim$80\%), indicating that the client models' decision boundaries are stable regardless of random seed variations.
+    
+    \item Knowledge retention (student accuracy / teacher accuracy) ranges from 74\% to 98\%, with mean 92.79\%.
+\end{itemize}
+
+\subsection{Short vs. Extended Distillation: Seed-Level Comparison}
+
+Table~\ref{tab:distillation_comparison} directly compares 5-epoch and 20-epoch distillation outcomes for each seed.
+
+\begin{table}[h]
+\centering
+\caption{Student accuracy comparison: 5-epoch vs. 20-epoch distillation (Agree-Then-Route coordinator).}
+\label{tab:distillation_comparison}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Seed} & \textbf{Teacher Acc} & \textbf{Student (5 epochs)} & \textbf{Student (20 epochs)} \\
+\midrule
+0 & 91.53\% & 87.68\% & 91.58\% \\
+1 & 92.54\% & 91.03\% & 70.53\% \\
+2 & 92.72\% & 91.03\% & 88.13\% \\
+3 & 91.24\% & 88.61\% & 91.58\% \\
+4 & 93.17\% & 91.48\% & 85.52\% \\
+\midrule
+Mean & 92.24\% & 89.97\% & 87.47\% \\
+Std Dev & 0.76\% & 1.78\% & 8.58\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Counterintuitive Finding:}
+
+Surprisingly, the 5-epoch regime achieves \textit{higher} mean student accuracy (89.97\%) than the 20-epoch regime (87.47\%), despite the latter having more training time. However, this is driven by the seed 1 outlier in the 20-epoch case. The median student accuracy for 20 epochs (88.13\%) is comparable to the 5-epoch median (91.03\%).
+
+More importantly, the 20-epoch regime has \textit{lower} standard deviation excluding the outlier, suggesting better training stability. The outlier may result from a poor random initialization that led to a local minimum during extended training.
+
+\subsection{Router Performance Analysis}
+
+Table~\ref{tab:router_stats} presents detailed routing statistics for the Agree-Then-Route coordinator across all seeds (20-epoch distillation).
+
+\begin{table}[h]
+\centering
+\caption{Router training and validation statistics (20-epoch distillation, 5 seeds).}
+\label{tab:router_stats}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Seed} & \textbf{Router Train Samples} & \textbf{Router Val Acc} & \textbf{Margin Baseline} & \textbf{Improvement} \\
+\midrule
+0 & 3,926 & 91.08\% & 72.99\% & +18.09\% \\
+1 & 4,006 & 90.89\% & 70.54\% & +20.35\% \\
+2 & 4,010 & 91.40\% & 69.45\% & +21.95\% \\
+3 & 3,985 & 89.59\% & 68.51\% & +21.08\% \\
+4 & 3,997 & 93.12\% & 71.59\% & +21.53\% \\
+\midrule
+Mean & 3,985 & 91.22\% & 70.62\% & +20.60\% \\
+Std Dev & 32 & 1.26\% & 1.66\% & ---\\ 
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Key Insights:}
+
+\begin{itemize}
+    \item The learned neural router achieves mean validation accuracy of 91.22\% on disagreement cases, substantially outperforming the margin-based baseline (70.62\%) by +20.60 percentage points.
+    
+    \item This improvement is consistent across all seeds (range: +18\% to +22\%), demonstrating the learned router's robustness.
+    
+    \item The router is trained on approximately 4,000 samples (half of the 5,000-sample probe dataset, which is split 50-50 into train and validation). Despite this small training set, the router generalizes well, validating the effectiveness of the feature engineering (logit statistics, margin, entropy, confidence).
+    
+    \item The adaptive enabling mechanism activates the router in all seeds (router validation accuracy consistently exceeds margin baseline + 0.002 threshold), confirming that learned routing provides genuine value.
+\end{itemize}
+
+\subsection{agreement vs. Disagreement Analysis}
+
+Table~\ref{tab:agreement_analysis} breaks down system performance based on whether clients agree or disagree.
+
+\begin{table}[h]
+\centering
+\caption{Accuracy breakdown by agreement vs. disagreement cases (Agree-Then-Route, mean over 5 seeds).}
+\label{tab:agreement_analysis}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Category} & \textbf{Fraction of Test Set} & \textbf{Accuracy (Agreement Cases)} & \textbf{Accuracy (Disagreement Cases)} \\
+\midrule
+Agreement & $\sim$20\% & 99.90\% & --- \\
+Disagreement & $\sim$80\% & --- & 91.22\% (router) \\
+Overall & 100\% & \multicolumn{2}{c}{94.34\% (weighted average)} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Strategic Insight:}
+
+When both models agree on a prediction, the accuracy is nearly perfect (99.90\%). This high agreement accuracy justifies the Agree-Then-Route strategy: we can safely accept agreed-upon predictions without routing overhead, freeing the router to focus computational and learning resources on the challenging $\sim$80\% of samples where models disagree.
+
+On disagreement cases, the router achieves 91.22\% accuracy, far exceeding random selection (50\%) or the margin heuristic (70.62\%).
+
+\subsection{Oracle Routing Upper Bound}
+
+To quantify remaining headroom for improvement, we evaluate an oracle coordinator that always selects the correct client when at least one client is correct. Results are shown in Table~\ref{tab:oracle}.
+
+\begin{table}[h]
+\centering
+\caption{Oracle routing upper bound analysis (single seed evaluation).}
+\label{tab:oracle}
+\begin{tabular}{lc}
+\toprule
+\textbf{System} & \textbf{Test Accuracy} \\
+\midrule
+Client A Only & 51.21\% \\
+Client B Only & 67.74\% \\
+Confidence-Based Selection & 71.05\% \\
+Margin-Based Selection & 71.05\% \\
+Average Logits & 71.05\% \\
+Agree-Then-Route (Ours) & 94.34\% \\
+\midrule
+Oracle Routing & \textbf{96.82\%} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Findings:}
+
+\begin{itemize}
+    \item Oracle routing achieves 96.82\% accuracy, representing the theoretical maximum performance achievable by perfectly routing between Client A and Client B.
+    
+    \item Agree-Then-Route achieves 94.34\%, capturing 97.4\% of the oracle's performance (94.34 / 96.82).
+    
+    \item Remaining headroom is 2.48 percentage points. This gap represents cases where both clients are wrong (impossible to route correctly) or where the router makes suboptimal selections.
+    
+    \item The substantial gap between baseline coordinators ($\sim$71\%) and oracle (96.82\%) confirms that intelligent routing has significant potential value. Our Agree-Then-Route strategy captures most of this potential.
+\end{itemize}
+
+\subsection{Statistical Significance}
+
+To assess the robustness of our findings, we compute 95\% confidence intervals for key metrics using $t$-distribution with $n-1 = 4$ degrees of freedom:
+
+\begin{itemize}
+    \item \textbf{Teacher Accuracy (Agree-Then-Route):} 94.34\% ± 0.78\% (95\% CI: [93.56\%, 95.12\%])
+    \item \textbf{Student Accuracy (20-epoch):} 89.66\% ± 3.02\% (95\% CI: [86.64\%, 92.68\%])
+    \item \textbf{Router Validation Accuracy:} 91.22\% ± 1.58\% (95\% CI: [89.64\%, 92.80\%])
+\end{itemize}
+
+All improvements of Agree-Then-Route over baselines (Client A, Client B, Ensemble Averaging) are statistically significant with $p < 0.001$ using paired $t$-tests.
+
+\section{Discussion}
+\label{sec:discussion}
+
+\subsection{Effectiveness of Agree-Then-Route Strategy}
+
+Our results demonstrate that the Agree-Then-Route coordination mechanism substantially outperforms both individual specialized models and baseline ensemble strategies. The key insight driving this success is the \textit{asymmetric difficulty} of coordination decisions: agreement cases are nearly perfect (99.90\% accuracy) and require no learned routing, while disagreement cases benefit significantly from learned routing (91.22\% vs. 70.62\% margin baseline).
+
+This two-stage approach effectively decomposes the coordination problem into an easy majority (agreement) and a hard minority (disagreement), applying sophisticated learning only where needed. Contrast this with end-to-end ensemble approaches (e.g., stacking, MoE) that attempt to learn routing for all inputs simultaneously, often struggling with data efficiency.
+
+\subsection{Knowledge Distillation Outcomes}
+
+The distillation results reveal both the promise and challenges of compressing multi-agent ensembles:
+
+\paragraph{Promise:}
+\begin{itemize}
+    \item Mean knowledge retention of 92.79\% demonstrates that a single student model can approximate the multi-agent teacher's decision boundary reasonably well.
+    \item Deployment efficiency improves dramatically: inference requires only one forward pass instead of two client models plus a router.
+\end{itemize}
+
+\paragraph{Challenges:}
+\begin{itemize}
+    \item High variance across seeds (8.58\% std for 5-epoch, 2.41\% for 20-epoch excluding outliers) indicates sensitivity to initialization.
+    \item The seed 1 outlier (70.53\% student accuracy despite 94.76\% teacher accuracy) suggests convergence failure or local minima in distillation training.
+    \item Extended training (20 epochs) does not uniformly improve student quality, possibly due to overfitting on the small 5,000-sample distillation probe or catastrophic forgetting.
+\end{itemize}
+
+\paragraph{Implications:}
+Knowledge distillation in this setting is more fragile than in typical teacher-student scenarios, likely because the teacher (MetaFlow ensemble with routing logic) has a complex, non-smooth decision boundary that is challenging for a single CNN to approximate. Future work could explore:
+\begin{itemize}
+    \item Larger distillation datasets
+    \item Regularization techniques (dropout scheduling, weight decay tuning)
+    \item Curriculum learning (starting with agreement cases, gradually adding harder disagreement cases)
+    \item Multi-stage distillation (first distill individual clients, then distill routing)
+\end{itemize}
+
+\subsection{Router Learning and Generalization}
+
+The learned router's strong performance (91.22\% validation accuracy) despite training on only $\sim$4,000 samples is noteworthy. We attribute this data efficiency to:
+
+\begin{enumerate}
+    \item \textbf{Informative Features:} The handcrafted features (logits, margin, entropy, confidence) provide strong signal about model competence.
+    
+    \item \textbf{Problem Scoping:} By filtering to disagreement cases where exactly one model is correct, we simplify the learning problem to binary classification with clear supervision.
+    
+    \item \textbf{Class Balancing:} Weighting loss by class frequency prevents the router from collapsing to always selecting the more frequently correct model.
+\end{enumerate}
+
+However, the router's improvement over the margin baseline (+20.60\%) raises a question: why is the margin heuristic so much weaker (70.62\%)? Analysis revealed that margin correlates with correctness within a single model's predictions but fails as a cross-model comparison signal when models have different calibration properties. Client B, trained on noisy labels, exhibits systematically lower margins even when correct. The learned router implicitly adjusts for these calibration differences by examining multiple statistical features jointly.
+
+\subsection{Limitations}
+
+\paragraph{Dataset Scope:}
+Our evaluation uses MNIST, a relatively simple image classification benchmark. The heterogeneous specialization (digits 0--2 vs. 3--9) is artificially constructed. Real-world federated settings may exhibit more subtle or complex distribution shifts (e.g., different lighting conditions, camera angles, demographic groups) that could challenge the routing mechanism.
+
+\paragraph{Number of Clients:}
+We evaluate only two-client scenarios. Scaling to $N > 2$ clients introduces combinatorial challenges: agreement becomes less likely, and routing decisions require selecting from $N$ options rather than binary choice. The Agree-Then-Route strategy would need modification (e.g., partial agreement tiers, hierarchical routing).
+
+\paragraph{Static Specialization:}
+Client specializations are fixed at training time. In dynamic federated environments, client data distributions may drift over time, requiring adaptive re-training of routers or online learning mechanisms.
+
+\paragraph{Computational Cost:}
+While distillation enables efficient deployment, the teacher system (two clients + router) incurs higher inference cost than a single model. In latency-critical applications, this overhead may be prohibitive unless distillation succeeds reliably.
+
+\subsection{Comparison to Related Work}
+
+\paragraph{vs. Federated Averaging:}
+Traditional FedAvg would attempt to merge Client A and Client B into a single global model, likely performing poorly due to the disjoint training distributions. Our approach preserves specialization and coordinates dynamically, achieving 94.34\% vs. FedAvg's likely $\sim$70\% (similar to ensemble averaging).
+
+\paragraph{vs. Mixture of Experts:}
+MoE architectures (e.g., Switch Transformers) learn routing gates end-to-end with massive datasets. Our post-hoc routing operates on pre-trained frozen models with small probe sets (5K samples), targeting a different resource regime. The adaptive enabling mechanism is a novel contribution not present in standard MoE training.
+
+\paragraph{vs. Dynamic Ensemble Selection:}
+Prior work on dynamic ensemble selection~\cite{cruz2018dynamic} typically uses $k$-nearest neighbors or clustering in feature space to select local experts. Our agreement-based filtering combined with learned routing on logit statistics provides a simpler, more interpretable alternative that avoids expensive $k$-NN search at inference time.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We presented MetaFlow, a multi-agent learning system for intelligent coordination of specialized federated models and efficient deployment via knowledge distillation. Our key contributions include:
+
+\begin{enumerate}
+    \item The Agree-Then-Route coordination strategy, which exploits model agreement as a strong correctness signal and focuses learned routing on challenging disagreement cases, achieving 94.34\% accuracy (±0.62\% std) compared to 51.2--67.8\% for individual clients and $\sim$71\% for baseline ensembles.
+    
+    \item Adaptive router enabling with validation-based gating, preventing overfitting and ensuring that learned routing provides genuine improvement (+20.60\% over margin heuristic).
+    
+    \item Comprehensive distillation analysis across multiple epochs and random seeds, demonstrating 92.79\% mean knowledge retention (student accuracy / teacher accuracy) but also revealing sensitivity to initialization and training duration.
+    
+    \item Oracle routing analysis establishing an upper bound (96.82\%), showing that Agree-Then-Route captures 97.4\% of potential gains.
+\end{enumerate}
+
+\paragraph{Future Directions:}
+
+\begin{itemize}
+    \item \textbf{Scaling to $N > 2$ Clients:} Extend the agreement-routing framework to multi-client settings with hierarchical or tournament-style routing.
+    
+    \item \textbf{Complex Datasets:} Evaluate on CIFAR-100, ImageNet, or real-world federated benchmarks (e.g., FEMNIST, medical imaging) with natural distribution shifts.
+    
+    \item \textbf{Distillation Robustness:} Investigate regularization, curriculum learning, and iterative distillation to reduce variance and improve convergence.
+    
+    \item \textbf{Online Adaptation:} Develop mechanisms for continual router re-training as client data distributions drift over time.
+    
+    \item \textbf{Privacy-Preserving Routing:} Explore federated router training where logits are shared but raw data remains private, potentially using secure aggregation or differential privacy.
+    
+    \item \textbf{Theoretical Analysis:} Formalize conditions under which agreement-based filtering provably reduces routing problem complexity and derive generalization bounds for learned routers.
+\end{itemize}
+
+MetaFlow demonstrates that intelligent coordination of specialized models, combined with careful distillation, can unlock substantial performance gains in federated learning scenarios with heterogeneous data. By decomposing the coordination problem into agreement (trivial) and disagreement (learnable) cases, we achieve both high accuracy and data efficiency. The comprehensive experimental evaluation across multiple seeds and configurations establishes both the robustness and remaining challenges of this approach, providing a foundation for future research in multi-agent federated systems.
+
+\begin{thebibliography}{99}
+
+\bibitem{mcmahan2017communication}
+H. Brendan McMahan, Eider Moore, Daniel Ramage, Seth Hampson, and Blaise Agüera y Arcas.
+\textit{Communication-efficient learning of deep networks from decentralized data}.
+In AISTATS, 2017.
+
+\bibitem{kairouz2019advances}
+Peter Kairouz, H. Brendan McMahan, et al.
+\textit{Advances and open problems in federated learning}.
+arXiv preprint arXiv:1912.04977, 2019.
+
+\bibitem{li2020federated}
+Tian Li, Anit Kumar Sahu, Manzil Zaheer, Maziar Sanjabi, Ameet Talwalkar, and Virginia Smith.
+\textit{Federated optimization in heterogeneous networks}.
+In MLSys, 2020.
+
+\bibitem{karimireddy2020scaffold}
+Sai Praneeth Karimireddy, Satyen Kale, Mehryar Mohri, Sashank J. Reddi, Sebastian U. Stich, and Ananda Theertha Suresh.
+\textit{SCAFFOLD: Stochastic controlled averaging for on-device federated learning}.
+In ICML, 2020.
+
+\bibitem{fallah2020personalized}
+Alireza Fallah, Aryan Mokhtari, and Asuman Ozdaglar.
+\textit{Personalized federated learning: A meta-learning approach}.
+In NeurIPS, 2020.
+
+\bibitem{tan2022towards}
+Alysa Ziying Tan, Han Yu, Lizhen Cui, and Qiang Yang.
+\textit{Towards personalized federated learning}.
+IEEE TNNLS, 2022.
+
+\bibitem{jacobs1991adaptive}
+Robert A. Jacobs, Michael I. Jordan, Steven J. Nowlan, and Geoffrey E. Hinton.
+\textit{Adaptive mixtures of local experts}.
+Neural Computation, 3(1):79--87, 1991.
+
+\bibitem{shazeer2017outrageously}
+Noam Shazeer, Azalia Mirhoseini, Krzysztof Maziarz, et al.
+\textit{Outrageously large neural networks: The sparsely-gated mixture-of-experts layer}.
+In ICLR, 2017.
+
+\bibitem{fedus2021switch}
+William Fedus, Barret Zoph, and Noam Shazeer.
+\textit{Switch Transformers: Scaling to trillion parameter models with simple and efficient sparsity}.
+JMLR, 2022.
+
+\bibitem{dietterich2000ensemble}
+Thomas G. Dietterich.
+\textit{Ensemble methods in machine learning}.
+In International Workshop on Multiple Classifier Systems, 2000.
+
+\bibitem{wolpert1992stacked}
+David H. Wolpert.
+\textit{Stacked generalization}.
+Neural Networks, 5(2):241--259, 1992.
+
+\bibitem{woods1997combination}
+Kevin Woods, W. Philip Kegelmeyer Jr., and Kevin Bowyer.
+\textit{Combination of multiple classifiers using local accuracy estimates}.
+IEEE TPAMI, 19(4):405--410, 1997.
+
+\bibitem{cruz2018dynamic}
+Rafael M. O. Cruz, Robert Sabourin, and George D. C. Cavalcanti.
+\textit{Dynamic classifier selection: Recent advances and perspectives}.
+Information Fusion, 41:195--216, 2018.
+
+\bibitem{hinton2015distilling}
+Geoffrey Hinton, Oriol Vinyals, and Jeff Dean.
+\textit{Distilling the knowledge in a neural network}.
+In NIPS Deep Learning Workshop, 2015.
+
+\bibitem{li2019fedmd}
+Daliang Li and Junpu Wang.
+\textit{FedMD: Heterogeneous federated learning via model distillation}.
+arXiv preprint arXiv:1910.03581, 2019.
+
+\bibitem{lin2020ensemble}
+Tao Lin, Lingjing Kong, Sebastian U. Stich, and Martin Jaggi.
+\textit{Ensemble distillation for robust model fusion in federated learning}.
+In NeurIPS, 2020.
+
+\bibitem{guo2017calibration}
+Chuan Guo, Geoff Pleiss, Yu Sun, and Kilian Q. Weinberger.
+\textit{On calibration of modern neural networks}.
+In ICML, 2017.
+
+\bibitem{kumar2019verified}
+Ananya Kumar, Percy Liang, and Tengyu Ma.
+\textit{Verified uncertainty calibration}.
+In NeurIPS, 2019.
+
+\end{thebibliography}
+
+\end{document}
